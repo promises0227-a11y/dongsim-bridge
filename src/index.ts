@@ -3,7 +3,11 @@ import cors from "cors";
 import express, { type Request, type Response, type NextFunction } from "express";
 import admin from "firebase-admin";
 import type { Firestore } from "firebase-admin/firestore";
-import { loadPrivateKey, toClientErrorMessage } from "./credentials.js";
+import {
+  loadCredential,
+  toClientErrorMessage,
+  type LoadedCredential,
+} from "./credentials.js";
 
 // ---------------------------------------------------------------------------
 // Firestore paths (verified from majeon-wallstreet / dongsim-backup source)
@@ -59,17 +63,22 @@ function requireEnv(name: string): string {
   return value;
 }
 
-function initFirebaseApps() {
-  if (admin.apps.length === 0) {
-    const mainPrivateKey = loadPrivateKey("MAIN_PRIVATE_KEY", "MAIN_PRIVATE_KEY_B64");
-    const backupPrivateKey = loadPrivateKey("BACKUP_PRIVATE_KEY", "BACKUP_PRIVATE_KEY_B64");
+function initFirebaseApps(): {
+  mainDb: Firestore;
+  backupDb: Firestore;
+  mainCred: LoadedCredential;
+  backupCred: LoadedCredential;
+} {
+  const mainCred = loadCredential("MAIN");
+  const backupCred = loadCredential("BACKUP");
 
+  if (admin.apps.length === 0) {
     admin.initializeApp(
       {
         credential: admin.credential.cert({
-          projectId: requireEnv("MAIN_PROJECT_ID"),
-          clientEmail: requireEnv("MAIN_CLIENT_EMAIL"),
-          privateKey: mainPrivateKey,
+          projectId: mainCred.projectId,
+          clientEmail: mainCred.clientEmail,
+          privateKey: mainCred.privateKey,
         }),
       },
       "main"
@@ -77,17 +86,23 @@ function initFirebaseApps() {
     admin.initializeApp(
       {
         credential: admin.credential.cert({
-          projectId: requireEnv("BACKUP_PROJECT_ID"),
-          clientEmail: requireEnv("BACKUP_CLIENT_EMAIL"),
-          privateKey: backupPrivateKey,
+          projectId: backupCred.projectId,
+          clientEmail: backupCred.clientEmail,
+          privateKey: backupCred.privateKey,
         }),
       },
       "backup"
+    );
+    console.log(
+      `[dongsim-bridge] main=${mainCred.projectId} (${mainCred.source}), ` +
+        `backup=${backupCred.projectId} (${backupCred.source})`
     );
   }
   return {
     mainDb: admin.app("main").firestore(),
     backupDb: admin.app("backup").firestore(),
+    mainCred,
+    backupCred,
   };
 }
 
@@ -451,7 +466,7 @@ async function transferCorpToMain(
 // Express app
 // ---------------------------------------------------------------------------
 
-const { mainDb, backupDb } = (() => {
+const { mainDb, backupDb, mainCred, backupCred } = (() => {
   try {
     return initFirebaseApps();
   } catch (err) {
@@ -479,17 +494,46 @@ function authMiddleware(req: Request, res: Response, next: NextFunction) {
 app.use(authMiddleware);
 
 app.get("/health", async (_req, res) => {
-  try {
-    await mainDb.collection("bridge_transfers").limit(1).get();
-    res.json({ status: "ok", firebase: "connected", timestamp: new Date().toISOString() });
-  } catch (err) {
-    res.status(503).json({
-      status: "error",
-      firebase: "disconnected",
-      message: toClientErrorMessage(err),
-      timestamp: new Date().toISOString(),
-    });
+  const timestamp = new Date().toISOString();
+  type SideHealth = {
+    status: "ok" | "error";
+    projectId: string;
+    clientEmail: string;
+    credentialSource: LoadedCredential["source"];
+    message?: string;
+  };
+  const projects: { main?: SideHealth; backup?: SideHealth } = {};
+
+  for (const [side, db, cred] of [
+    ["main", mainDb, mainCred],
+    ["backup", backupDb, backupCred],
+  ] as const) {
+    try {
+      await db.collection("bridge_transfers").limit(1).get();
+      projects[side] = {
+        status: "ok",
+        projectId: cred.projectId,
+        clientEmail: cred.clientEmail,
+        credentialSource: cred.source,
+      };
+    } catch (err) {
+      projects[side] = {
+        status: "error",
+        projectId: cred.projectId,
+        clientEmail: cred.clientEmail,
+        credentialSource: cred.source,
+        message: toClientErrorMessage(err),
+      };
+    }
   }
+
+  const connected = projects.main?.status === "ok" && projects.backup?.status === "ok";
+  res.status(connected ? 200 : 503).json({
+    status: connected ? "ok" : "error",
+    firebase: connected ? "connected" : "disconnected",
+    projects,
+    timestamp,
+  });
 });
 
 app.post("/transfer/main-to-backup", async (req, res) => {
