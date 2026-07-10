@@ -3,6 +3,7 @@ import cors from "cors";
 import express, { type Request, type Response, type NextFunction } from "express";
 import admin from "firebase-admin";
 import type { Firestore } from "firebase-admin/firestore";
+import { loadPrivateKey, toClientErrorMessage } from "./credentials.js";
 
 // ---------------------------------------------------------------------------
 // Firestore paths (verified from majeon-wallstreet / dongsim-backup source)
@@ -58,18 +59,17 @@ function requireEnv(name: string): string {
   return value;
 }
 
-function parsePrivateKey(raw: string): string {
-  return raw.replace(/\\n/g, "\n");
-}
-
 function initFirebaseApps() {
   if (admin.apps.length === 0) {
+    const mainPrivateKey = loadPrivateKey("MAIN_PRIVATE_KEY", "MAIN_PRIVATE_KEY_B64");
+    const backupPrivateKey = loadPrivateKey("BACKUP_PRIVATE_KEY", "BACKUP_PRIVATE_KEY_B64");
+
     admin.initializeApp(
       {
         credential: admin.credential.cert({
           projectId: requireEnv("MAIN_PROJECT_ID"),
           clientEmail: requireEnv("MAIN_CLIENT_EMAIL"),
-          privateKey: parsePrivateKey(requireEnv("MAIN_PRIVATE_KEY")),
+          privateKey: mainPrivateKey,
         }),
       },
       "main"
@@ -79,7 +79,7 @@ function initFirebaseApps() {
         credential: admin.credential.cert({
           projectId: requireEnv("BACKUP_PROJECT_ID"),
           clientEmail: requireEnv("BACKUP_CLIENT_EMAIL"),
-          privateKey: parsePrivateKey(requireEnv("BACKUP_PRIVATE_KEY")),
+          privateKey: backupPrivateKey,
         }),
       },
       "backup"
@@ -451,7 +451,14 @@ async function transferCorpToMain(
 // Express app
 // ---------------------------------------------------------------------------
 
-const { mainDb, backupDb } = initFirebaseApps();
+const { mainDb, backupDb } = (() => {
+  try {
+    return initFirebaseApps();
+  } catch (err) {
+    console.error("[dongsim-bridge] Firebase Admin 초기화 실패:", toClientErrorMessage(err));
+    throw err;
+  }
+})();
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 const BRIDGE_SECRET = requireEnv("BRIDGE_SECRET");
@@ -471,8 +478,18 @@ function authMiddleware(req: Request, res: Response, next: NextFunction) {
 
 app.use(authMiddleware);
 
-app.get("/health", (_req, res) => {
-  res.json({ status: "ok", timestamp: new Date().toISOString() });
+app.get("/health", async (_req, res) => {
+  try {
+    await mainDb.collection("bridge_transfers").limit(1).get();
+    res.json({ status: "ok", firebase: "connected", timestamp: new Date().toISOString() });
+  } catch (err) {
+    res.status(503).json({
+      status: "error",
+      firebase: "disconnected",
+      message: toClientErrorMessage(err),
+      timestamp: new Date().toISOString(),
+    });
+  }
 });
 
 app.post("/transfer/main-to-backup", async (req, res) => {
@@ -483,7 +500,7 @@ app.post("/transfer/main-to-backup", async (req, res) => {
     const result = await transferMainToBackup(mainDb, backupDb, studentId, amount, idempotencyKey);
     res.json({ success: true, ...result });
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = toClientErrorMessage(err);
     const status = message.includes("부족") ? 400 : message.includes("Unauthorized") ? 401 : 500;
     res.status(status).json({ success: false, message });
   }
@@ -497,7 +514,7 @@ app.post("/transfer/backup-to-main", async (req, res) => {
     const result = await transferBackupToMain(mainDb, backupDb, studentId, amount, idempotencyKey);
     res.json({ success: true, ...result });
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = toClientErrorMessage(err);
     const status = message.includes("부족") ? 400 : 500;
     res.status(status).json({ success: false, message });
   }
@@ -511,7 +528,7 @@ app.post("/transfer/corp-to-main", async (req, res) => {
     const result = await transferCorpToMain(mainDb, backupDb, studentId, amount, idempotencyKey);
     res.json({ success: true, ...result });
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = toClientErrorMessage(err);
     const status =
       message.includes("부족") || message.includes("만 가능") ? 400 : 500;
     res.status(status).json({ success: false, message });

@@ -78,7 +78,13 @@ npm start
 | `MAIN_PRIVATE_KEY` | `private_key` |
 | `BACKUP_*` | dongsim-backup 프로젝트 동일 |
 
-`private_key`는 Render 환경변수에 넣을 때 줄바꿈을 `\n`으로 이스케이프하거나, Render의 multiline 입력을 사용하세요.
+`private_key`는 Render 환경변수에 넣을 때 **앞뒤 따옴표(`"`) 없이** 넣거나, multiline 입력을 사용하세요.
+
+**Render에서 `DECODER routines::unsupported` 오류가 나면** (가장 흔한 원인: 따옴표 포함·줄바꿈 깨짐):
+
+1. `node scripts/encode-key-for-render.mjs path/to/service-account.json` 실행
+2. 출력된 `PRIVATE_KEY_B64` 값을 Render에 `MAIN_PRIVATE_KEY_B64` / `BACKUP_PRIVATE_KEY_B64` 로 등록
+3. 기존 `MAIN_PRIVATE_KEY` / `BACKUP_PRIVATE_KEY` 는 **삭제**하거나 비워 두기 (B64가 우선)
 
 `BRIDGE_SECRET`는 충분히 긴 랜덤 문자열로 설정하고, 클라이언트 앱(마전·백업)에서 동일 값을 헤더로 전송합니다.
 
